@@ -96,6 +96,7 @@
     <Reference Include="System.Text.Encoding" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="CompilationCache.cs" />
     <Compile Include="CompilationProxy.cs" />
     <Compile Include="Compilation.cs" />
     <Compile Include="PrecompilationCommandLineArgs.cs" />

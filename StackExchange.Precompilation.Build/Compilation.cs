@@ -80,7 +80,34 @@ namespace StackExchange.Precompilation
                 var sdkDirectory = RuntimeEnvironment.GetRuntimeDirectory();
                 CscArgs = CSharpCommandLineParser.Default.Parse(_precompilationCommandLineArgs.Arguments, _precompilationCommandLineArgs.BaseDirectory, sdkDirectory);
                 
+                var compilationModules = LoadModules().ToList();
+                
+                var pdbPath = CscArgs.PdbPath;
+                var outputPath = Path.Combine(CscArgs.OutputDirectory, CscArgs.OutputFileName);
+
+                if (!CscArgs.EmitPdb)
+                {
+                    pdbPath = null;
+                }
+                else if (string.IsNullOrWhiteSpace(pdbPath))
+                {
+                    pdbPath = Path.ChangeExtension(outputPath, ".pdb");
+                }
+
                 Diagnostics = new List<Diagnostic>(CscArgs.Errors);
+
+                // TODO: global variable, interface, register it somewhere?
+                var cache = new CompilationCache("D:\\CompilationCache");
+                var cacheKey = cache.CalculateHash(_precompilationCommandLineArgs.Arguments, CscArgs, compilationModules);
+                IEnumerable<Diagnostic> cachedDiagnostics;
+                if (cache.TryEmit(cacheKey, outputPath, pdbPath, CscArgs.DocumentationPath, out cachedDiagnostics))
+                {
+                    // the diagnostics are printed in the finally
+                    Diagnostics = new List<Diagnostic>(cachedDiagnostics);
+                    Console.WriteLine("Warning: Restored from Cache!");
+                    return true;
+                }
+
                 if (Diagnostics.Any())
                 {
                     return false;
@@ -90,7 +117,6 @@ namespace StackExchange.Precompilation
                 var references = SetupReferences();
                 var sources = LoadSources(CscArgs.SourceFiles);
 
-                var compilationModules = LoadModules().ToList();
 
                 var compilation = CSharpCompilation.Create(
                     options: CscArgs.CompilationOptions.WithAssemblyIdentityComparer(GetAssemblyIdentityComparer()),
@@ -108,7 +134,45 @@ namespace StackExchange.Precompilation
                     Resources = CscArgs.ManifestResources.ToList()
                 });
 
-                var emitResult = Emit(context);
+                EmitResult emitResult;
+                using (var peStream = new MemoryStream())
+                using (var pdbStream = !string.IsNullOrWhiteSpace(pdbPath) ? new MemoryStream() : null)
+                using (var xmlDocumentationStream = !string.IsNullOrWhiteSpace(CscArgs.DocumentationPath) ? new MemoryStream() : null)
+                using (var win32Resources = CreateWin32Resource(context.BeforeCompileContext.Compilation))
+                {
+                    // https://github.com/dotnet/roslyn/blob/41950e21da3ac2c307fb46c2ca8c8509b5059909/src/Compilers/Core/Portable/CommandLine/CommonCompiler.cs#L437
+                    emitResult = context.BeforeCompileContext.Compilation.Emit(
+                        peStream: peStream,
+                        pdbStream: pdbStream,
+                        xmlDocumentationStream: xmlDocumentationStream,
+                        win32Resources: win32Resources,
+                        manifestResources: CscArgs.ManifestResources,
+                        options: CscArgs.EmitOptions,
+                        debugEntryPoint: null);
+
+                    Diagnostics.AddRange(emitResult.Diagnostics);
+                    context.After(new AfterCompileContext
+                    {
+                        Arguments = CscArgs,
+                        AssemblyStream = peStream,
+                        Compilation = context.BeforeCompileContext.Compilation,
+                        Diagnostics = Diagnostics,
+                        SymbolStream = pdbStream,
+                        XmlDocStream = xmlDocumentationStream,
+                    });
+
+                    // do not create the output files if emit fails
+                    // if the output files are there, msbuild incremental build thinks the previous build succeeded
+                    if (emitResult.Success)
+                    {
+                        Task.WaitAll(
+                            DumpToFileAsync(outputPath, peStream),
+                            DumpToFileAsync(pdbPath, pdbStream),
+                            DumpToFileAsync(CscArgs.DocumentationPath, xmlDocumentationStream));
+
+                        cache.Cache(cacheKey, outputPath, pdbPath, CscArgs.DocumentationPath, Diagnostics);
+                    }
+                }
                 return emitResult.Success;
             }
             finally
@@ -165,61 +229,6 @@ namespace StackExchange.Precompilation
             using (var manifestStream = compilation.Options.OutputKind != OutputKind.NetModule ? CscArgs.Win32Manifest != null ? File.OpenRead(CscArgs.Win32Manifest) : null : null)
             using (var iconStream = CscArgs.Win32Icon != null ? File.OpenRead(CscArgs.Win32Icon) : null)
                 return compilation.CreateDefaultWin32Resources(true, CscArgs.NoWin32Manifest, manifestStream, iconStream);
-        }
-
-        private EmitResult Emit(CompileContext context)
-        {
-            var compilation = context.BeforeCompileContext.Compilation;
-            var pdbPath = CscArgs.PdbPath;
-            var outputPath = Path.Combine(CscArgs.OutputDirectory, CscArgs.OutputFileName);
-
-            if (!CscArgs.EmitPdb)
-            {
-                pdbPath = null;
-            }
-            else if (string.IsNullOrWhiteSpace(pdbPath))
-            {
-                pdbPath = Path.ChangeExtension(outputPath, ".pdb");
-            }
-
-            using (var peStream = new MemoryStream())
-            using (var pdbStream = !string.IsNullOrWhiteSpace(pdbPath) ? new MemoryStream() : null)
-            using (var xmlDocumentationStream = !string.IsNullOrWhiteSpace(CscArgs.DocumentationPath) ? new MemoryStream(): null)
-            using (var win32Resources = CreateWin32Resource(compilation))
-            {
-                // https://github.com/dotnet/roslyn/blob/41950e21da3ac2c307fb46c2ca8c8509b5059909/src/Compilers/Core/Portable/CommandLine/CommonCompiler.cs#L437
-                var emitResult = compilation.Emit(
-                    peStream: peStream,
-                    pdbStream: pdbStream,
-                    xmlDocumentationStream: xmlDocumentationStream,
-                    win32Resources: win32Resources,
-                    manifestResources: CscArgs.ManifestResources,
-                    options: CscArgs.EmitOptions,
-                    debugEntryPoint: null);
-
-                Diagnostics.AddRange(emitResult.Diagnostics);
-                context.After(new AfterCompileContext
-                {
-                    Arguments = CscArgs,
-                    AssemblyStream = peStream,
-                    Compilation = compilation,
-                    Diagnostics = Diagnostics,
-                    SymbolStream = pdbStream,
-                    XmlDocStream = xmlDocumentationStream,
-                });
-
-                // do not create the output files if emit fails
-                // if the output files are there, msbuild incremental build thinks the previous build succeeded
-                if (emitResult.Success)
-                {
-                    Task.WaitAll(
-                        DumpToFileAsync(outputPath, peStream),
-                        DumpToFileAsync(pdbPath, pdbStream),
-                        DumpToFileAsync(CscArgs.DocumentationPath, xmlDocumentationStream));
-                }
-
-                return emitResult;
-            }
         }
 
         private static async Task DumpToFileAsync(string path, MemoryStream stream)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -13,6 +14,11 @@ namespace StackExchange.Precompilation
             Console.SetIn(@in);
             Console.SetOut(@out);
             Console.SetError(error);
+        }
+        private static bool Break(Exception ex)
+        {
+            Debugger.Launch();
+            return false;
         }
 
         public static bool RunCs(string[] args)
@@ -73,7 +79,14 @@ namespace StackExchange.Precompilation
         // making the methods below static would not be a good idea, they need to run in the compilation app domain
         private bool RunCs(PrecompilationCommandLineArgs precompilationArgs)
         {
-            return new Compilation(precompilationArgs).Run();
+            try
+            {
+                return new Compilation(precompilationArgs).Run();
+            }
+            catch (Exception ex) when (Break(ex))
+            {
+                throw new NotImplementedException();
+            }
         }
 
         private void HookAssemblyReslove(IEnumerable<string> references)
