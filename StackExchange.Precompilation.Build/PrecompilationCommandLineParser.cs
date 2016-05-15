@@ -88,9 +88,20 @@ namespace StackExchange.Precompilation
                 }
                 else if(arg.StartsWith("/r:") || arg.StartsWith("/reference:"))
                 {
-                    // don't care about extern stuff for now..
-                    // https://msdn.microsoft.com/en-us/library/ms173212.aspx
-                    references.Add(ParseFileFromArg(arg));
+                    try
+                    {
+                        references.Add(ParseFileFromArg(arg));
+                    }
+                    catch (NotSupportedException)
+                    {
+                        // don't care about extern stuff for now..
+                        // https://msdn.microsoft.com/en-us/library/ms173212.aspx
+
+                        // see https://github.com/StackExchange/StackExchange.Precompilation/issues/2
+
+                        // these dlls won't be loaded into the app-domain,
+                        // but this doesn't affect the compilation with roslyn.
+                    }
                 }
                 else if(arg.StartsWith("/appconfig:"))
                 {
