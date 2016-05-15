@@ -15,13 +15,6 @@ using System.Reflection;
 
 namespace StackExchange.Precompilation
 {
-    public interface ICompilationCache
-    {
-        Guid CalculateHash(string[] commandLine, CSharpCommandLineArguments cscArgs, List<ICompileModule> compilationModules);
-        bool TryEmit(Guid hashKey, string outputPath, string pdbPath, string documentationPath, out IEnumerable<Diagnostic> diagnostics);
-        void Cache(Guid hashKey, string outputPath, string pdbPath, string documentationPath, IEnumerable<Diagnostic> diagnostics);
-    }
-
     public class CompilationCache : ICompilationCache
     {
         string _cacheDir;

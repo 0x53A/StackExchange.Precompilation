@@ -122,6 +122,10 @@
     </None>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Hydra\Hydra.fsproj">
+      <Project>{98a4fe13-7746-433c-9f12-b50e97deb267}</Project>
+      <Name>Hydra</Name>
+    </ProjectReference>
     <ProjectReference Include="..\StackExchange.Precompilation.Metaprogramming\StackExchange.Precompilation.Metaprogramming.csproj">
       <Project>{E42F58D0-658F-4EB8-A031-45DE998F769D}</Project>
       <Name>StackExchange.Precompilation.Metaprogramming</Name>
