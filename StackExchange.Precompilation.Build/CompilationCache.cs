@@ -23,9 +23,10 @@ namespace StackExchange.Precompilation
             _cacheDir = cacheDir;
         }
 
-        public Guid CalculateHash(string[] commandLine, CSharpCommandLineArguments cscArgs, List<ICompileModule> compilationModules)
+        public async Task<Guid> CalculateHash(string[] commandLine, CSharpCommandLineArguments cscArgs, List<ICompileModule> compilationModules)
         {
             //Debugger.Launch();
+            var hasher = Hydra.getHashActorRef
 
             var verboseCache = new StringBuilder();
             verboseCache.AppendLine("CompilationModules:");

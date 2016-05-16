@@ -1,7 +1,6 @@
 ﻿module Hydra
 
 open System
-
 open Microsoft.CodeAnalysis.CSharp
 
 open Nessos.FsPickler
@@ -20,6 +19,7 @@ open System.Diagnostics
 open System.Threading.Tasks
 open System.Collections.Generic
 open System.Collections.Concurrent
+open System.Security.Cryptography
 
 type Cache() =
     interface StackExchange.Precompilation.ICompilationCache with
@@ -86,11 +86,12 @@ type Actor private () =
 
     static member EndPoint = TcpListenerPool.GetListener().LocalEndPoint
 type Change = string * WatcherChangeTypes
+let cachedHashes = ConcurrentDictionary<string, Guid>()
 let changed = ConcurrentQueue<Change>()
 let fsws = List<FileSystemWatcher>()
 let rec internal serverLoop (self : Actor<ServerMsg>) = async {
     let! msg = self.Receive()
-
+    
     match msg with
     | WatchDirectory dir ->
         let fsw = new FileSystemWatcher(dir)
@@ -99,14 +100,22 @@ let rec internal serverLoop (self : Actor<ServerMsg>) = async {
                             NotifyFilters.LastWrite |||
                             NotifyFilters.Size
         fsw.Changed.Add(fun x -> changed.Enqueue(x.FullPath,x.ChangeType))
-        fsw.InternalBufferSize <- max fsw.InternalBufferSize (64*1024)
+        fsw.Error.Add(fun x -> cachedHashes.Clear())
+        fsw.InternalBufferSize <- 64 * 1024
         fsw.EnableRaisingEvents <- true
         fsws.Add(fsw)
-        ()
     | GetHashOf (ids, rc) ->
-        let replies = Guid.Empty
-        do! rc.Reply replies
-
+        try
+            let hash =
+                let hash = ref Guid.Empty
+                match cachedHashes.TryGetValue(ids, hash) with
+                | true -> hash.Value
+                | false ->
+                    use md5 = MD5.Create()
+                    File.OpenRead ids |> md5.ComputeHash |> Guid
+            do! rc.Reply hash
+        with
+        | exn -> do! rc.ReplyWithException exn
     return! serverLoop self
 }
 
