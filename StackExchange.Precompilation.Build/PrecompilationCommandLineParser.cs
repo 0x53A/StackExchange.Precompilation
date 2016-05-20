@@ -78,32 +78,19 @@ namespace StackExchange.Precompilation
 
             var loadedRsp = new HashSet<string>();
             var references = new HashSet<string>();
-            for(var i = 0; i < arguments.Length; i++)
+            for (var i = 0; i < arguments.Length; i++)
             {
                 var arg = arguments[i];
-                if(arg.StartsWith("@"))
+                if (arg.StartsWith("@"))
                 {
                     if (!loadedRsp.Add(arg = ParseFileFromArg(arg, '@'))) continue;
                     arguments = arguments.Concat(File.ReadAllLines(arg).SelectMany(SplitCommandLine)).ToArray();
                 }
-                else if(arg.StartsWith("/r:") || arg.StartsWith("/reference:"))
+                else if (arg.StartsWith("/r:") || arg.StartsWith("/reference:"))
                 {
-                    try
-                    {
-                        references.Add(ParseFileFromArg(arg));
-                    }
-                    catch (NotSupportedException)
-                    {
-                        // don't care about extern stuff for now..
-                        // https://msdn.microsoft.com/en-us/library/ms173212.aspx
-
-                        // see https://github.com/StackExchange/StackExchange.Precompilation/issues/2
-
-                        // these dlls won't be loaded into the app-domain,
-                        // but this doesn't affect the compilation with roslyn.
-                    }
+                    references.Add(ParseFileFromReference(arg));
                 }
-                else if(arg.StartsWith("/appconfig:"))
+                else if (arg.StartsWith("/appconfig:"))
                 {
                     result.AppConfig = ParseFileFromArg(arg);
                 }
@@ -115,6 +102,16 @@ namespace StackExchange.Precompilation
         private static string ParseFileFromArg(string arg, char delimiter = ':')
         {
             return Path.GetFullPath(arg.Substring(arg.IndexOf(delimiter) + 1));
+        }
+
+        private static string ParseFileFromReference(string arg)
+        {
+            var rxReference = new Regex("/(r|(reference)):([a-zA-Z0-9]*=)?(?<ref>.*)");
+            var match = rxReference.Match(arg);
+            if (!match.Success)
+                throw new Exception($"Could not find a reference in {arg}");
+            var reference = match.Groups["ref"].Value;
+            return Path.GetFullPath(reference);
         }
     }
 }
