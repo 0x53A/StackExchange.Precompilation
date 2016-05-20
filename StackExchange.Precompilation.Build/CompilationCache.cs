@@ -23,10 +23,10 @@ namespace StackExchange.Precompilation
             _cacheDir = cacheDir;
         }
 
-        public async Task<Guid> CalculateHash(string[] commandLine, CSharpCommandLineArguments cscArgs, List<ICompileModule> compilationModules)
+        public Guid CalculateHash(string[] commandLine, CSharpCommandLineArguments cscArgs, List<ICompileModule> compilationModules)
         {
             //Debugger.Launch();
-            var hasher = Hydra.getHashActorRef
+            var hasher = Hydra.Program.getHashActorRef().Result;
 
             var verboseCache = new StringBuilder();
             verboseCache.AppendLine("CompilationModules:");
@@ -36,11 +36,11 @@ namespace StackExchange.Precompilation
             verboseCache.AppendLine(" Types:");
             foreach (var t in types)
                 verboseCache.AppendFormat("  {0}\n", t.FullName);
-            var assemblyHashes = (from a in types select new { a.Assembly, hash = Hasher.ComputeHash(File.OpenRead(a.Assembly.Location)) })
+            var assemblyHashes = (from a in types select new { a.Assembly, hash = hasher.GetHashOfFile(a.Assembly.Location).ToByteArray() })
                                     .ToDictionary(key => key.Assembly, val => val.hash);
             verboseCache.AppendLine(" Assemblies:");
             foreach (var a in assemblyHashes.OrderBy(kv=>kv.Key))
-                verboseCache.AppendFormat("  {0}->{1}\n", a.Key, new Guid(a.Value));
+                verboseCache.AppendFormat("  {0}->{1}\n", a.Key, a.Value);
 
             var hashOfCompilationModules = Hasher.Combine(compilationModules.SelectMany(m => new[] { Hasher.ComputeHash(m.GetType().FullName), assemblyHashes[m.GetType().Assembly] }));
             verboseCache.AppendFormat(" Full: {0}\n", new Guid(hashOfCompilationModules).ToString());

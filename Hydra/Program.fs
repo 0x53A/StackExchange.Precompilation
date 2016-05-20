@@ -1,165 +1,107 @@
-﻿module Hydra
+﻿[<AutoOpen>]
+module Hydra.Program
 
 open System
-open Microsoft.CodeAnalysis.CSharp
-
-open Nessos.FsPickler
-open Nessos.Thespian
 open System.Threading
-open Nessos.Thespian.Remote.TcpProtocol
-
-open Nessos.Thespian
-open Nessos.Thespian.Serialization
-open Nessos.Thespian.Remote
-open Nessos.Thespian.Remote.TcpProtocol
-open System.IO
-open Nessos.Vagabond
 open System.Reflection
 open System.Diagnostics
 open System.Threading.Tasks
-open System.Collections.Generic
-open System.Collections.Concurrent
-open System.Security.Cryptography
+open Microsoft.Win32
 
-type Cache() =
-    interface StackExchange.Precompilation.ICompilationCache with
-        member x.TryEmit(hashKey, outputPath, pdbPath, documentationPath, diagnostics) : bool = failwith "nyi"
-        member x.CalculateHash(commandLine, cscArgs, compilationModules) = failwith "nyi"
-        member x.Cache(hashKey, outputPath, pdbPath, documentationPath, diagnostics) = failwith "nyi"
-
-let compareSequences = Seq.compareWith Operators.compare
-let expectedSameAsResult expected result = (compareSequences expected result = 0)
-let (|Array|_|) pattern toMatch =
-    let patternLength = Seq.length pattern
-    let toMatchLength = Array.length toMatch
-    if patternLength > toMatchLength then
-        None
-    else
-        if toMatch |> Seq.take patternLength |> expectedSameAsResult pattern then
-            let tail = toMatch.[patternLength..]
-            Some (tail)
-        else
-            None
+open Nessos.Thespian
+open System.IO
 
 
-type internal ServerMsg =
-    | WatchDirectory of string
-    | GetHashOf of string * IReplyChannel<Guid>
-
-
-/// Vagabond configuration container
-type VagabondConfig private () =
-
-    static let manager =
-        let cachePath = Path.Combine(Path.GetTempPath(), sprintf "thunkServerCache-%s" <| Guid.NewGuid().ToString("N"))
-        let _ = Directory.CreateDirectory cachePath
-        Vagabond.Initialize(cacheDirectory = cachePath, ignoredAssemblies = [Assembly.GetExecutingAssembly()])
-
-    static member Instance = manager
-    static member Serializer = manager.Pickler
-        
-        
-/// Actor configuration tools
-type Actor private () =
-
-    static do
-        let _ = System.Threading.ThreadPool.SetMinThreads(100, 100) 
-        defaultSerializer <- new FsPicklerMessageSerializer(VagabondConfig.Serializer)
-        Nessos.Thespian.Default.ReplyReceiveTimeout <- Timeout.Infinite
-        TcpListenerPool.RegisterListener(IPEndPoint.any)
-
-    /// Publishes an actor instance to the default TCP protocol
-    static member Publish(actor : Actor<'T>, ?name) =
-        let name = match name with Some n -> n | None -> Guid.NewGuid().ToString()
-        actor
-        |> Actor.rename name
-        |> Actor.publish [ Protocols.utcp() ]
-        |> Actor.start
-        
-    /// Publishes an actor instance to the default TCP protocol
-    static member Publish(receiver : Receiver<'T>, ?name) =
-        let name = match name with Some n -> n | None -> Guid.NewGuid().ToString()
-        receiver
-        |> Receiver.rename name
-        |> Receiver.publish [ Protocols.utcp() ]
-        |> Receiver.start
-
-    static member EndPoint = TcpListenerPool.GetListener().LocalEndPoint
-type Change = string * WatcherChangeTypes
-let cachedHashes = ConcurrentDictionary<string, Guid>()
-let changed = ConcurrentQueue<Change>()
-let fsws = List<FileSystemWatcher>()
-let rec internal serverLoop (self : Actor<ServerMsg>) = async {
-    let! msg = self.Receive()
-    
-    match msg with
-    | WatchDirectory dir ->
-        let fsw = new FileSystemWatcher(dir)
-        fsw.NotifyFilter <- NotifyFilters.FileName |||
-                            NotifyFilters.DirectoryName |||
-                            NotifyFilters.LastWrite |||
-                            NotifyFilters.Size
-        fsw.Changed.Add(fun x -> changed.Enqueue(x.FullPath,x.ChangeType))
-        fsw.Error.Add(fun x -> cachedHashes.Clear())
-        fsw.InternalBufferSize <- 64 * 1024
-        fsw.EnableRaisingEvents <- true
-        fsws.Add(fsw)
-    | GetHashOf (ids, rc) ->
-        try
-            let hash =
-                let hash = ref Guid.Empty
-                match cachedHashes.TryGetValue(ids, hash) with
-                | true -> hash.Value
-                | false ->
-                    use md5 = MD5.Create()
-                    File.OpenRead ids |> md5.ComputeHash |> Guid
-            do! rc.Reply hash
-        with
-        | exn -> do! rc.ReplyWithException exn
-    return! serverLoop self
-}
-
-let internal launch() = async {
-    use receiver = Receiver.create<ActorRef<ServerMsg>> () |> Actor.Publish
+let internal launchFileHashActorAsSeperateProcess() = async {
+    use receiver = Receiver.create<ActorRef<FileHashActor.ServerMsg>> () |> Actor.Publish
     let! awaiter = receiver.ReceiveEvent |> Async.AwaitEvent |> Async.StartChild
     
     let exe = Assembly.GetExecutingAssembly().Location
-    let argument = VagabondConfig.Serializer.Pickle receiver.Ref |> System.Convert.ToBase64String
-    let proc = Process.Start(exe, argument)
+    let base64Receiver = VagabondConfig.Serializer.Pickle receiver.Ref |> Convert.ToBase64String
+    use proc = Process.Start(exe, "--file-hash-cache " + base64Receiver)
 
     let! serverRef = awaiter
     return serverRef
 }
 
-let internal getActorRef() =
-    let wasCreated = ref false
-    use m = new Mutex(false, "Local\\Hydra", wasCreated)
+let internal getOrLaunchFileHashActor() = async {
+    // aquire mutex, to make sure there are no simultanious process launches
+    use m = new Mutex(false, "Local\\Hydra")
     m.WaitOne() |> ignore
-    let p = Process.GetProcessesByName("Hydra")
-    m.ReleaseMutex()
-    launch()
 
+    // try to read value from registry
+    use rk = Registry.CurrentUser.CreateSubKey("Software\\Hydra")
+    let! existingActor = async {
+        let b64existingActorRef = rk.GetValue("FileHashActorRef") :?> string
+        if b64existingActorRef <> null then
+            try
+                let ref = VagabondConfig.Serializer.UnPickle<ActorRef<FileHashActor.ServerMsg>> (Convert.FromBase64String b64existingActorRef)
+                do! ref.PostWithReply (fun ch -> FileHashActor.ServerMsg.Ping ch)
+                return Some ref
+            with
+                exn -> return None
+        else
+            return None
+    }
+
+    match existingActor with
+    | Some ref -> return ref
+    | None ->
+        // no actor exists -> launch and set in registry
+        let! ref = launchFileHashActorAsSeperateProcess()
+        let b64ref = ref |> VagabondConfig.Serializer.Pickle |> Convert.ToBase64String
+        rk.SetValue("FileHashActorRef", b64ref)
+        return ref
+}
+
+// C# Interface
 type IFileHashActorRef =    
-     abstract member GetHashOf : string -> Task<Guid>
+     abstract member GetHashOfFileAsync : string -> Task<Guid>
+     abstract member GetHashOfFile : string -> Guid
 
 let getHashActorRef() = Async.StartAsTask( async {
-    let! actorRef = getActorRef()
-
+    let! actorRef = getOrLaunchFileHashActor()
+    let post path = actorRef.PostWithReply((fun ch -> FileHashActor.ServerMsg.GetHashOf(path, ch)), timeout = 1*1000)
     return { new IFileHashActorRef with
-                 member x.GetHashOf path = actorRef.PostWithReply(fun ch -> GetHashOf(path, ch)) |> Async.StartAsTask }
+                 member x.GetHashOfFileAsync path =
+                    post path |> Async.StartAsTask
+                 member x.GetHashOfFile path =
+                    post path |> Async.RunSynchronously
+           }
   })
+
+
+type Cache() =
+    interface StackExchange.Precompilation.ICompilationCache with
+        member x.TryEmit(hashKey, outputPath, pdbPath, documentationPath, diagnostics) = failwith "nyi"
+        member x.CalculateHash(commandLine, cscArgs, compilationModules) = failwith "nyi"
+        member x.Cache(hashKey, outputPath, pdbPath, documentationPath, diagnostics) = failwith "nyi"
+
+
 [<EntryPoint>]
 let main argv =
+    printfn "Starting: %A" argv
     match argv with
-    | Array ["--file-hash-cache"] [|x64|] ->
+    | Array [|"--file-hash-cache"|] [|x64|] ->
         let bytes = Convert.FromBase64String x64
-        let ref = VagabondConfig.Serializer.UnPickle<ActorRef<ActorRef<ServerMsg>>> bytes        
-        let actor = serverLoop |> Actor.bind |> (fun a-> Actor.Publish(a, name= "hydra"))
+        let ref = VagabondConfig.Serializer.UnPickle<ActorRef<ActorRef<FileHashActor.ServerMsg>>> bytes
+        let mutable isAlive = true
+        let a = FileHashActor.get (fun () -> isAlive <- false)
+        let actor = Actor.Publish(a, name= "hydra")
         ref.Post actor.Ref
-        while true do Thread.Sleep 1000
+        while isAlive do Thread.Sleep 1000
         0
-    | Array ["--attach-worker"] tail ->
+    | Array [|"--attach-worker"|] tail ->
         0
     | _ ->
+        let asx = async {
+            let! ref = launchFileHashActorAsSeperateProcess()
+            do! ref.PostWithReply(fun ch -> FileHashActor.ServerMsg.Ping ch)
+            let file = Path.GetTempFileName()
+            File.WriteAllText(file, "this is a test!")
+            let! hash = ref.PostWithReply(fun ch -> FileHashActor.ServerMsg.GetHashOf (file, ch))
+            return hash
+        }
+        let hash = asx |> Async.RunSynchronously
         eprintfn "Error: unexpected args: %A" argv
-        exit 1 
+        exit 0

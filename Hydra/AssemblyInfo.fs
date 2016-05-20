@@ -1,4 +1,4 @@
-﻿module AssemblyInfo
+﻿module Hydra.AssemblyInfo
 
 open System.Reflection
 open System.Runtime.CompilerServices

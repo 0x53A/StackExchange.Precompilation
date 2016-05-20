@@ -97,7 +97,7 @@ namespace StackExchange.Precompilation
                 Diagnostics = new List<Diagnostic>(CscArgs.Errors);
 
                 // TODO: global variable, interface, register it somewhere?
-                var cache = new CompilationCache("D:\\CompilationCache");
+                var cache = new CompilationCache("c:\\CompilationCache");
                 var cacheKey = cache.CalculateHash(_precompilationCommandLineArgs.Arguments, CscArgs, compilationModules);
                 IEnumerable<Diagnostic> cachedDiagnostics;
                 if (cache.TryEmit(cacheKey, outputPath, pdbPath, CscArgs.DocumentationPath, out cachedDiagnostics))
